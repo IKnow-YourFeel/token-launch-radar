@@ -241,3 +241,40 @@ export function assessLaunchReadiness(input: ReadinessInput, asOf: string): Laun
     components,
   };
 }
+
+/** A one-line summary of an assessment, for the board and the dossier:
+ * "ready · 82 · 3–6 months". */
+export function readinessSummary(readiness: LaunchReadiness): string {
+  return `${readiness.band} · ${readiness.score} · ${readiness.window}`;
+}
+
+/** A short sentence describing an assessment in plain words, for the
+ * dossier and for a protocol's detail view: the score, the band, the
+ * window, and the drivers behind the read. */
+export function describeReadiness(readiness: LaunchReadiness): string {
+  const drivers = readiness.drivers.length > 0 ? readiness.drivers.join('; ') : 'no driver recorded';
+  return `Launch readiness ${readiness.score} (${readiness.band}), window ${readiness.window}; driven by ${drivers}.`;
+}
+
+/** How many of a board's assessments fall in each band, for the integrity
+ * strip: the three counts must add up to the number of rows assessed. */
+export function readinessBandCounts(assessments: LaunchReadiness[]): { ready: number; warming: number; watch: number } {
+  const counts = { ready: 0, warming: 0, watch: 0 };
+  for (const assessment of assessments) counts[assessment.band] += 1;
+  return counts;
+}
+
+/** The order a window label sorts in, earliest first; an unknown label
+ * sorts last so a new label can never silently jump the queue. */
+export function windowOrder(window: string): number {
+  const order = ['0–3 months', '3–6 months', '6–12 months', '6–18 months', '12+ months', 'no near-term signal'];
+  const at = order.indexOf(window);
+  return at < 0 ? order.length : at;
+}
+
+/** Sort order for assessments: higher score first, then the earlier
+ * window, so a readiness column has a stable, explainable order. */
+export function compareReadiness(a: LaunchReadiness, b: LaunchReadiness): number {
+  if (a.score !== b.score) return b.score - a.score;
+  return windowOrder(a.window) - windowOrder(b.window);
+}

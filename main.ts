@@ -18,6 +18,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { assessLaunchReadiness } from './lib/launch-readiness.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -52,7 +53,25 @@ if (issue !== null) {
 }
 
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
+// One extra field per row, from the launch-readiness module: the gate check
+// above already ran on the plain board, and nothing here re-sorts or
+// re-scores it, so ranks, implied values and farm plans are untouched.
+const boardWithReadiness = board.map((row) => ({
+  ...row,
+  launch_readiness: assessLaunchReadiness(
+    {
+      tvl_usd: row.tvl_usd,
+      change_7d: row.change_7d,
+      category: row.category,
+      chains: row.chains,
+      age_days: row.age_days,
+      listed_at: row.listed_at,
+      category_multiple: row.model.category_multiple,
+    },
+    snapshot.as_of,
+  ),
+}));
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: boardWithReadiness })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */

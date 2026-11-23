@@ -99,6 +99,21 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
+.checks { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.check-row { display: flex; flex-wrap: wrap; gap: var(--step-2); }
+.check { font-family: var(--font-num); font-size: 12px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--canvas); }
+.check.pass { border-color: var(--accent); color: var(--accent); }
+.check.fail { border-color: var(--negative); color: var(--negative); }
+.audit { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.ledger { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--step-3); }
+.ledger > div { display: flex; justify-content: space-between; gap: var(--step-2); padding: var(--step-2) 0; border-bottom: 1px solid var(--border); }
+.ledger > div.total { grid-column: 1 / -1; border-bottom: 0; font-weight: 600; }
+.ledger span { color: var(--muted); font-size: 13px; }
+.verdict { margin-bottom: var(--step-4); padding: var(--step-4); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--canvas); display: grid; gap: var(--step-2); }
+.verdict.farm { border-color: var(--accent); }
+.verdict.skip { border-color: var(--negative); }
+.verdict .equation { margin-top: var(--step-1); }
+
 .model { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
 .mults { display: flex; flex-wrap: wrap; gap: var(--step-2); }
 .mult { font-family: var(--font-num); font-size: 12px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--canvas); }

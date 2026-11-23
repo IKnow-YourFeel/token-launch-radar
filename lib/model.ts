@@ -1,4 +1,4 @@
-// The token radar's model, radar-2: one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model, radar-3: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board ranks EVERY protocol that passes the house's own exclusion rules, not an arbitrary
 // top-N by TVL: pre-token, not a CEX, bridge, canonical bridge, liquid-staking or restaking
@@ -7,22 +7,48 @@
 // floor the watchlist leaves out, plus 138 rankable protocols below it. The watchlist is the
 // floor, never the ceiling, and the board is the whole rankable universe the snapshot holds.
 //
-// Implied value follows only from the snapshot's own figures, and the category multiple is
-// derived from the snapshot itself, not chosen by hand:
+// Implied value follows only from the snapshot's own figures. The pricing term is a size
+// curve fitted on the snapshot's live-token protocols (see lib/validation.ts): log(mcap)
+// = a + b * log(TVL) by least squares, so a protocol's fitted base value is exp(a) * TVL^b.
+// The curve is tested held-out two ways — walk-forward and leave-one-out — and both test
+// numbers are printed on the dashboard; a flat overall multiple and a per-category
+// intercept were tested the same way and did not beat the curve, so no category term
+// prices the board. The category multiple below survives only as a descriptive stat
+// (the launch-readiness module's input and a dashboard display), not as a price.
 //
-//   categoryMultiple = shrink(median live mcap/TVL in the category, overall live median)
-//                      prior weight 20, clamped to 0.12..0.35, so a category with one live
-//                      protocol cannot sweep the board on a single noisy ratio
+//   fittedBase = exp(a) x TVL^b            (a, b fit on the 128 live comps)
 //   growth     = clamp(change_7d, -50, 80) per cent
 //   growthMult = 1 + (growth / 100) x 0.6
 //   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
 //   chainMult  = 1 + min(max(chains - 1, 0), 10) x 0.015
-//   implied    = max(1, round(tvl_usd x categoryMultiple x growthMult x maturity x chainMult))
+//   implied    = max(1, round(fittedBase x growthMult x maturity x chainMult))
 //
-// Age is the time since the protocol was first listed, the best record of how long it has run
-// with no token. Live-token protocols are kept apart and shown as the market's own values,
-// never mixed into the ranked board. No protocol name is ever special-cased: the same
-// function scores every row, and the dashboard recomputes every row from the same figures.
+// Growth, maturity and chain breadth are bounded launch adjustments, not fitted pricing
+// terms: the held-out tests show they neither help nor hurt the pricing fit, so they are
+// kept only as small bounded multipliers and the dashboard says so.
+//
+// Every row also carries token odds — the fitted probability a token ever lists, from
+// the peers' record — and an expected value, implied x odds, which is a separate field:
+// the ranking itself never moves on odds, so implied_value_usd stays traceable. The
+// farm plan is costed with a verdict (farm / thin / skip) from its own gas, time and
+// odds. Age is the time since the protocol was first listed, the best record of how
+// long it has run with no token. Live-token protocols are kept apart and shown as the
+// market's own values, never mixed into the ranked board. No protocol name is ever
+// special-cased: the same function scores every row, and the dashboard recomputes
+// every row from the same figures.
+
+import { assessLaunchReadiness, type LaunchReadiness } from './launch-readiness.ts';
+import {
+  auditSnapshot,
+  fitSizeCurve,
+  fitTokenOdds,
+  tokenOddsFor,
+  validateSizeCurve,
+  type Audit,
+  type SizeCurve,
+  type SizeCurveValidation,
+  type TokenOddsModel,
+} from './validation.ts';
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -79,7 +105,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -102,6 +128,26 @@ export interface FarmStep {
   time: string;
 }
 
+/** A farm plan's costed verdict: what the plan costs, what it earns per hour of work, and the call. */
+export interface FarmVerdict {
+  /** Capital the plan puts to work, in USD. */
+  capital_usd: number;
+  /** Out-of-pocket gas for the whole plan, in USD. */
+  gas_usd: number;
+  /** Total outlay: capital plus gas, in USD. */
+  total_cost_usd: number;
+  /** Active work the plan takes, in minutes (the hold itself is waiting, not work). */
+  active_minutes: number;
+  /** Gas cost per hour of active work, in USD. */
+  cost_per_hour_usd: number;
+  /** The airdrop must be worth at least this much for the gas alone to break even, in USD. */
+  breakeven_usd: number;
+  /** farm: worth farming; thin: marginal; skip: not worth the gas at these odds. */
+  verdict: 'farm' | 'thin' | 'skip';
+  /** The verdict in one sentence, with the numbers in it. */
+  note: string;
+}
+
 /** One row of board.json: the ranked board's row. */
 export interface BoardRow {
   rank: number;
@@ -118,8 +164,18 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  /** The fitted probability a token ever lists, from the peers' record. */
+  token_odds: number;
+  /** Implied value times token odds: the expected launch value, a separate field. */
+  expected_value_usd: number;
   model: {
+    /** Descriptive only: the category's shrunk median live mcap/TVL. Not a price. */
     category_multiple: number;
+    /** The fitted size curve's intercept and slope. */
+    size_curve_a: number;
+    size_curve_b: number;
+    /** The fitted base value: exp(a) x TVL^b, before the launch adjustments. */
+    size_curve_base_usd: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -127,6 +183,8 @@ export interface BoardRow {
     age_days: number | null;
   };
   farm_steps: string[];
+  farm_verdict: FarmVerdict;
+  launch_readiness: LaunchReadiness;
 }
 
 /** The dashboard's compact view of one row, with farm plans generated in the page. */
@@ -142,10 +200,16 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  token_odds: number;
+  expected_value_usd: number;
   category_multiple: number;
+  size_curve_a: number;
+  size_curve_b: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   chain_multiplier: number;
+  farm_verdict: FarmVerdict;
+  launch_readiness: LaunchReadiness;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -172,6 +236,14 @@ export interface RadarData {
   live_size: number;
   category_multiples: Record<string, number>;
   overall_multiple: number;
+  /** The fitted size curve that prices the board. */
+  size_curve: SizeCurve;
+  /** Both held-out tests of the size curve, and the flat-multiple comparison. */
+  validation: SizeCurveValidation;
+  /** The fitted token-odds model. */
+  odds_model: TokenOddsModel;
+  /** The audit: every protocol in the snapshot, classified exactly once. */
+  audit: Audit;
   watchlist: string[];
   rows: RadarRow[];
   live: LiveRow[];
@@ -212,8 +284,9 @@ function median(values: number[]): number {
  * The category multiples, derived from the snapshot's own live-token protocols: for each
  * category, the median market-cap / TVL of its live protocols, shrunk toward the overall
  * live median with a prior of `category_prior` protocols, then clamped. A category with
- * no live protocol takes the overall median. The shrinkage is what keeps a category with
- * one live protocol from setting the board on a single noisy ratio.
+ * no live protocol takes the overall median. These are descriptive only since radar-3:
+ * the fitted size curve prices the board, and this multiple survives as the
+ * launch-readiness module's category input and as a dashboard display.
  */
 export function categoryMultiples(snapshot: Snapshot, model: ModelConstants = MODEL): { multiples: Record<string, number>; overall: number } {
   const live = snapshot.protocols.filter((p) => !isPreToken(p) && p.tvl_usd > 0 && p.mcap_usd !== null && p.mcap_usd > 0);
@@ -241,8 +314,18 @@ export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
+  curve: SizeCurve,
   multiples: Record<string, number>,
-): { implied: number; categoryMultiple: number; growthPct: number; growthMult: number; maturityMult: number; chainMult: number; age: number | null } {
+): {
+  implied: number;
+  categoryMultiple: number;
+  sizeCurveBase: number;
+  growthPct: number;
+  growthMult: number;
+  maturityMult: number;
+  chainMult: number;
+  age: number | null;
+} {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
@@ -252,8 +335,9 @@ export function impliedValue(
   const chainCount = protocol.chains.length;
   const chainMult = 1 + Math.min(Math.max(chainCount - 1, 0), model.chain_max) * model.chain_step;
   const categoryMultiple = multiples[protocol.category ?? 'Other'] ?? 0.2;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * categoryMultiple * growthMult * maturityMult * chainMult));
-  return { implied, categoryMultiple, growthPct, growthMult, maturityMult, chainMult, age };
+  const sizeCurveBase = protocol.tvl_usd > 0 ? Math.exp(curve.a + curve.b * Math.log(protocol.tvl_usd)) : 1;
+  const implied = Math.max(1, Math.round(sizeCurveBase * growthMult * maturityMult * chainMult));
+  return { implied, categoryMultiple, sizeCurveBase: Math.round(sizeCurveBase), growthPct, growthMult, maturityMult, chainMult, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -284,37 +368,61 @@ export function isRankable(p: SnapshotProtocol): boolean {
 /** The protocols the board ranks, strongest first, with ranks 1..n: every rankable protocol. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const { multiples } = categoryMultiples(snapshot, model);
+  const curve = fitSizeCurve(snapshot);
+  const oddsModel = fitTokenOdds(snapshot);
   const chosen = snapshot.protocols.filter(isRankable);
   const scored = chosen.map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model, multiples);
+    const v = impliedValue(p, snapshot.as_of, model, curve, multiples);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return scored.map((s, i) => ({
-    rank: i + 1,
-    slug: s.p.slug,
-    name: s.p.name,
-    category: s.p.category,
-    chains: s.p.chains,
-    tvl_usd: s.p.tvl_usd,
-    change_7d: s.p.change_7d,
-    mcap_usd: s.p.mcap_usd,
-    listed_at: s.p.listed_at,
-    gecko_id: s.p.gecko_id,
-    symbol: s.p.symbol,
-    token_status: 'pre-token',
-    age_days: s.age,
-    implied_value_usd: s.implied,
-    model: {
-      category_multiple: s.categoryMultiple,
-      growth_pct: s.growthPct,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
-      chain_multiplier: round4(s.chainMult),
+  return scored.map((s, i) => {
+    const odds = tokenOddsFor(s.p, snapshot.as_of, oddsModel);
+    const expected = Math.max(1, Math.round(s.implied * odds));
+    return {
+      rank: i + 1,
+      slug: s.p.slug,
+      name: s.p.name,
+      category: s.p.category,
+      chains: s.p.chains,
+      tvl_usd: s.p.tvl_usd,
+      change_7d: s.p.change_7d,
+      mcap_usd: s.p.mcap_usd,
+      listed_at: s.p.listed_at,
+      gecko_id: s.p.gecko_id,
+      symbol: s.p.symbol,
+      token_status: 'pre-token',
       age_days: s.age,
-    },
-    farm_steps: farmSteps(s.p, s.age).map(stepText),
-  }));
+      implied_value_usd: s.implied,
+      token_odds: odds,
+      expected_value_usd: expected,
+      model: {
+        category_multiple: s.categoryMultiple,
+        size_curve_a: round4(curve.a),
+        size_curve_b: round4(curve.b),
+        size_curve_base_usd: s.sizeCurveBase,
+        growth_pct: s.growthPct,
+        growth_multiplier: round4(s.growthMult),
+        maturity_multiplier: round4(s.maturityMult),
+        chain_multiplier: round4(s.chainMult),
+        age_days: s.age,
+      },
+      farm_steps: farmSteps(s.p, s.age).map(stepText),
+      farm_verdict: farmVerdict(s.p, s.age, odds),
+      launch_readiness: assessLaunchReadiness(
+        {
+          tvl_usd: s.p.tvl_usd,
+          change_7d: s.p.change_7d,
+          category: s.p.category,
+          chains: s.p.chains,
+          age_days: s.age,
+          listed_at: s.p.listed_at,
+          category_multiple: s.categoryMultiple,
+        },
+        snapshot.as_of,
+      ),
+    };
+  });
 }
 
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
@@ -405,6 +513,43 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   ];
 }
 
+/**
+ * A farm plan's costed verdict, from the same rules farmSteps uses — the
+ * capital tiers, the gas of each step and the weekly action — plus the
+ * protocol's token odds. The gas is the out-of-pocket cost: the capital
+ * stays in the position and comes back at the exit. Active work is the
+ * minutes of doing things; the hold is waiting, not work. The call is a
+ * rule, stated here and on the dashboard: skip when the odds of a token
+ * ever listing are under 15%, thin when they are under 35% or the gas
+ * runs over $25, farm otherwise. The break-even is the gas alone: the
+ * airdrop must be worth at least that much for the plan to pay for itself.
+ */
+export function farmVerdict(p: SnapshotProtocol, age: number | null, odds: number): FarmVerdict {
+  const capital = capitalFor(p);
+  const hold = holdDaysFor(age);
+  const weeks = Math.max(1, Math.ceil(hold / 7));
+  const gas = 3 + (capital >= 150 ? 8 : 4) + 2 + 2 * weeks + 4;
+  const activeMinutes = 5 + 15 + 10 + 10 * weeks + 10 + 10;
+  const costPerHour = Math.round((gas / (activeMinutes / 60)) * 100) / 100;
+  const verdict: FarmVerdict['verdict'] = odds < 0.15 ? 'skip' : odds < 0.35 || gas > 25 ? 'thin' : 'farm';
+  const note =
+    verdict === 'farm'
+      ? `Farm: $${gas} of gas over ${activeMinutes} minutes of active work ($${costPerHour}/hour); the airdrop must be worth at least $${gas} to cover the gas.`
+      : verdict === 'thin'
+        ? `Thin: $${gas} of gas over ${activeMinutes} minutes of active work ($${costPerHour}/hour) at ${Math.round(odds * 100)}% launch odds; only farm it if you are already using this protocol.`
+        : `Skip: ${Math.round(odds * 100)}% launch odds do not justify $${gas} of gas over ${activeMinutes} minutes of active work.`;
+  return {
+    capital_usd: capital,
+    gas_usd: gas,
+    total_cost_usd: capital + gas,
+    active_minutes: activeMinutes,
+    cost_per_hour_usd: costPerHour,
+    breakeven_usd: gas,
+    verdict,
+    note,
+  };
+}
+
 /** The live-token protocols, by market cap, for the dashboard's Live token view. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
@@ -436,10 +581,16 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    token_odds: row.token_odds,
+    expected_value_usd: row.expected_value_usd,
     category_multiple: row.model.category_multiple,
+    size_curve_a: row.model.size_curve_a,
+    size_curve_b: row.model.size_curve_b,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     chain_multiplier: row.model.chain_multiplier,
+    farm_verdict: row.farm_verdict,
+    launch_readiness: row.launch_readiness,
   };
 }
 
@@ -461,6 +612,10 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     category_multiples: multiples,
     overall_multiple: overall,
+    size_curve: fitSizeCurve(snapshot),
+    validation: validateSizeCurve(snapshot),
+    odds_model: fitTokenOdds(snapshot),
+    audit: auditSnapshot(snapshot),
     watchlist: snapshot.watchlist,
     rows: board.map(radarRow),
     live,

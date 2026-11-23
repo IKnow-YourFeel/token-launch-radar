@@ -1,4 +1,4 @@
-// A working token-radar-01 entry (Node 22, standard library only), radar-2 model.
+// A working token-radar-01 entry (Node 22, standard library only), radar-3 model.
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores
 // every rankable pre-token protocol with the model in lib/model.ts, writes the ranked board to
@@ -8,8 +8,10 @@
 // The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
 // and dashboard/app.js read /output/data.js, which this program writes from the same board. It covers
 // all 197 rankable protocols (the 40 watchlist slugs plus every other protocol that passes the
-// house's exclusion rules), states its snapshot-derived model, and gives every protocol a
-// seven-step farm plan with costs and times.
+// house's exclusion rules), states its snapshot-derived model — a size curve fitted on the
+// snapshot's live-token protocols and tested held-out two ways — and gives every protocol
+// token launch odds, an expected value, a costed farm verdict, and a seven-step farm plan
+// with costs and times. The audit in data.js accounts for all 758 snapshot protocols.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -18,7 +20,6 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
-import { assessLaunchReadiness } from './lib/launch-readiness.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -53,25 +54,10 @@ if (issue !== null) {
 }
 
 mkdirSync(out, { recursive: true });
-// One extra field per row, from the launch-readiness module: the gate check
-// above already ran on the plain board, and nothing here re-sorts or
-// re-scores it, so ranks, implied values and farm plans are untouched.
-const boardWithReadiness = board.map((row) => ({
-  ...row,
-  launch_readiness: assessLaunchReadiness(
-    {
-      tvl_usd: row.tvl_usd,
-      change_7d: row.change_7d,
-      category: row.category,
-      chains: row.chains,
-      age_days: row.age_days,
-      listed_at: row.listed_at,
-      category_multiple: row.model.category_multiple,
-    },
-    snapshot.as_of,
-  ),
-}));
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: boardWithReadiness })}\n`);
+// The board already carries token odds, expected values, farm verdicts and
+// launch readiness: buildBoard computed them, and the gate check above ran
+// on the same rows, so nothing here re-sorts or re-scores anything.
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */
@@ -107,5 +93,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: audit ${radar.audit.total} = ${radar.audit.ranked} ranked + ${radar.audit.live} live + ${radar.audit.excluded_total} excluded (category ${radar.audit.excluded.category}, versioned ${radar.audit.excluded.versioned}, wrapped ${radar.audit.excluded.wrapped}, exchange ${radar.audit.excluded.exchange})\n` +
+    `token radar: size curve log(mcap) = ${radar.size_curve.a.toFixed(3)} + ${radar.size_curve.b.toFixed(3)} log(TVL) on ${radar.size_curve.n} live comps; held-out walk-forward x${radar.validation.walk_forward.x} (flat x${radar.validation.flat_walk_forward.x}), leave-one-out x${radar.validation.leave_one_out.x} (flat x${radar.validation.flat_leave_one_out.x})\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
